@@ -63,6 +63,7 @@ class Listener:
         device: str = "cpu",
         compute_type: str = "int8",
         language: str = "en",
+        silero_sensitivity: float = 0.4,
     ) -> None:
         self._on_final_text = on_final_text
         self._on_fatal_error = on_fatal_error
@@ -73,6 +74,7 @@ class Listener:
             device=device,
             compute_type=compute_type,
             language=language,
+            silero_sensitivity=silero_sensitivity,
             on_partial_text=on_partial_text,
         )
         self._thread: threading.Thread | None = None
@@ -93,6 +95,7 @@ class Listener:
         device: str,
         compute_type: str,
         language: str,
+        silero_sensitivity: float,
         on_partial_text: OnText | None,
     ) -> AudioToTextRecorder:
         last_exc: Exception | None = None
@@ -103,6 +106,7 @@ class Listener:
                     device=device,
                     compute_type=compute_type,
                     language=language,
+                    silero_sensitivity=silero_sensitivity,
                     enable_realtime_transcription=on_partial_text is not None,
                     on_realtime_transcription_update=on_partial_text,
                     on_recording_start=self._on_recording_start,

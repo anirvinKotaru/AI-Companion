@@ -42,6 +42,7 @@ def main() -> None:
         speaker: Speaker | Avatar = Avatar(
             image_path=settings.avatar_image_path,
             rhubarb_path=settings.rhubarb_path,
+            voice=settings.tts_voice,
             timeout=settings.avatar_timeout_seconds,
         )
     else:
@@ -130,6 +131,7 @@ def main() -> None:
         device=settings.stt_device,
         compute_type=settings.stt_compute_type,
         language=settings.stt_language,
+        silero_sensitivity=settings.stt_silero_sensitivity,
     )
 
     logger.info("Listening... speak into your microphone (Ctrl+C to stop).")

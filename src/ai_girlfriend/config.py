@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     stt_device: SttDevice = "cpu"
     stt_compute_type: SttComputeType = "int8"
     stt_language: str = "en"
+    # Silero VAD's "is this actually speech" threshold: 0 (least sensitive)
+    # to 1 (most). RealtimeSTT's own default is 0.4; lowered here because a
+    # brief non-speech sound clearing this bar is enough to fire
+    # on_speech_start and barge-in-interrupt whatever she's currently
+    # saying — even though that recording usually then turns out too short
+    # to produce a transcript, leaving nothing to replace the reply it just
+    # cut off. WebRTC VAD (the other half of the onset gate) is already at
+    # its own strictest built-in setting and isn't configurable further.
+    stt_silero_sensitivity: float = 0.3
 
     tts_voice: str = ""
     tts_timeout_seconds: float = 15.0
@@ -51,7 +60,7 @@ class Settings(BaseSettings):
     avatar_timeout_seconds: float = 15.0
 
     groq_api_key: SecretStr = SecretStr("")
-    llm_model: str = "llama-3.1-8b-instant"
+    llm_model: str = "openai/gpt-oss-20b"
     llm_system_prompt: str = DEFAULT_SYSTEM_PROMPT
     llm_history_turns: int = 6
     llm_timeout_seconds: float = 10.0

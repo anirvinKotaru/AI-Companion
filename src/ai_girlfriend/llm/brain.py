@@ -38,7 +38,7 @@ class Brain:
         self,
         api_key: str,
         *,
-        model: str = "llama-3.1-8b-instant",
+        model: str = "openai/gpt-oss-20b",
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         history_turns: int = 6,
         timeout: float = 10.0,

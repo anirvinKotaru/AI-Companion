@@ -37,3 +37,9 @@ def test_groq_api_key_is_redacted_in_repr() -> None:
     settings = Settings(groq_api_key="super-secret-value")
     assert "super-secret-value" not in repr(settings)
     assert settings.groq_api_key.get_secret_value() == "super-secret-value"
+
+
+def test_stt_silero_sensitivity_defaults_lower_than_library_default() -> None:
+    # RealtimeSTT's own default is 0.4; ours is deliberately lower to cut
+    # down on background noise triggering voice-activity false positives.
+    assert Settings(_env_file=None).stt_silero_sensitivity < 0.4  # type: ignore[call-arg]
