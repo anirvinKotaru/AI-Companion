@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.env
+src/ai_girlfriend/avatar/face_landmarker.task
+*.log
+Rhubarb-Lip-Sync-*/
