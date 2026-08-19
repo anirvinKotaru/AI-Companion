@@ -109,19 +109,29 @@ def warp_mouth(image: np.ndarray, mouth: MouthGeometry, shape: MouthShape) -> np
     h, w = image.shape[:2]
     cx, cy = mouth.center
     sigma_x = mouth.width_px * 0.9
-    sigma_y = mouth.height_px * 1.6
 
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-    weight = np.exp(-(((xs - cx) ** 2) / (2 * sigma_x**2) + ((ys - cy) ** 2) / (2 * sigma_y**2)))
+    x_falloff = (xs - cx) ** 2 / (2 * sigma_x**2)
+
+    # Vertical (jaw-open) displacement uses a tall falloff, since it's meant
+    # to drag the chin/jaw region down with the lower lip.
+    sigma_y_jaw = mouth.height_px * 1.6
+    weight_jaw = np.exp(-(x_falloff + (ys - cy) ** 2 / (2 * sigma_y_jaw**2)))
+
+    # Horizontal (pucker/stretch) displacement uses a much shorter falloff,
+    # confined to the mouth itself — with the same tall falloff as above this
+    # warp reached up into the nose bridge and pinched it into a blade shape.
+    sigma_y_mouth = mouth.height_px * 0.6
+    weight_mouth = np.exp(-(x_falloff + (ys - cy) ** 2 / (2 * sigma_y_mouth**2)))
 
     # Only the region at/below the mouth center drops for an open jaw; the
     # upper lip stays roughly put, mimicking how a real jaw hinges open.
     jaw_factor = np.clip((ys - (cy - mouth.height_px * 0.3)) / mouth.height_px, 0.0, 1.0)
     dy_max = mouth.height_px * 1.3
-    dx_max = mouth.width_px * 0.5
+    dx_max = mouth.width_px * 0.35
 
-    disp_y = shape.open_amount * dy_max * weight * jaw_factor
-    disp_x = shape.width * dx_max * weight * np.sign(xs - cx)
+    disp_y = shape.open_amount * dy_max * weight_jaw * jaw_factor
+    disp_x = shape.width * dx_max * weight_mouth * np.sign(xs - cx)
 
     map_x = (xs - disp_x).astype(np.float32)
     map_y = (ys - disp_y).astype(np.float32)
