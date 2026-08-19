@@ -154,7 +154,18 @@ class Avatar:
     def _worker_loop(self) -> None:
         self._init_window()
         while True:
-            item = self._queue.get()
+            # Polled with a short timeout rather than a plain blocking get():
+            # pygame needs its event queue pumped regularly or Windows marks
+            # the window "Not Responding" almost immediately, even while
+            # just idling between phrases waiting for the next say() call.
+            try:
+                item = self._queue.get(timeout=_POLL_SECONDS)
+            except queue.Empty:
+                self._pump_events()
+                if self._stop_event.is_set():
+                    self._close_window()
+                    return
+                continue
             if item is _SHUTDOWN:
                 self._close_window()
                 return
