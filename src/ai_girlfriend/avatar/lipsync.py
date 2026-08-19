@@ -34,12 +34,15 @@ def run_rhubarb(
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         output_path = Path(tmp_dir) / "cues.json"
-        args = [rhubarb_path, "-f", "json", "-o", str(output_path)]
+        # str(Path(...)) normalizes slash direction: on Windows, CreateProcess
+        # (via subprocess) fails to locate a relative executable path that
+        # uses forward slashes, even though os.path.exists() accepts them.
+        args = [str(Path(rhubarb_path)), "-f", "json", "-o", str(output_path)]
         if dialog_text:
             dialog_path = Path(tmp_dir) / "dialog.txt"
             dialog_path.write_text(dialog_text, encoding="utf-8")
             args += ["-d", str(dialog_path)]
-        args.append(wav_path)
+        args.append(str(Path(wav_path)))
 
         subprocess.run(args, capture_output=True, timeout=timeout, check=True, text=True)
         data = json.loads(output_path.read_text(encoding="utf-8"))
