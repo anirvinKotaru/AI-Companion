@@ -4,6 +4,7 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pythoncom
@@ -48,9 +49,20 @@ class Speaker:
     worker thread down for good, meant for process shutdown.
     """
 
-    def __init__(self, voice: str = "", timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        voice: str = "",
+        timeout: float = 15.0,
+        on_playback_start: Callable[[], None] | None = None,
+        on_playback_end: Callable[[], None] | None = None,
+    ) -> None:
         self._voice_name = voice
         self._timeout = timeout
+        # Bracket actual audio output (not queueing/synthesis) so a caller can
+        # mute the microphone for exactly as long as her voice is audible —
+        # see Listener.mute()'s docstring for why.
+        self._on_playback_start = on_playback_start
+        self._on_playback_end = on_playback_end
         self._local = threading.local()
         self._queue: queue.Queue[Any] = queue.Queue()
         self._stop_event = threading.Event()
@@ -110,23 +122,29 @@ class Speaker:
         # not cancel *this* phrase too, only whatever it replaced.
         self._interrupt_event.clear()
         voice = self._get_voice()
-        voice.Speak(text, SVSF_FLAGS_ASYNC)
-        start = time.monotonic()
-        while True:
-            if voice.WaitUntilDone(_WAIT_POLL_MS):
-                return
-            if self._stop_event.is_set():
-                logger.debug("TTS interrupted by stop()")
-                voice.Speak("", SVSF_PURGE_BEFORE_SPEAK)
-                return
-            if self._interrupt_event.is_set():
-                logger.debug("TTS interrupted by barge-in")
-                voice.Speak("", SVSF_PURGE_BEFORE_SPEAK)
-                return
-            if time.monotonic() - start > self._timeout:
-                logger.warning("TTS timed out after %.1fs; skipping phrase", self._timeout)
-                voice.Speak("", SVSF_PURGE_BEFORE_SPEAK)
-                return
+        if self._on_playback_start is not None:
+            self._on_playback_start()
+        try:
+            voice.Speak(text, SVSF_FLAGS_ASYNC)
+            start = time.monotonic()
+            while True:
+                if voice.WaitUntilDone(_WAIT_POLL_MS):
+                    return
+                if self._stop_event.is_set():
+                    logger.debug("TTS interrupted by stop()")
+                    voice.Speak("", SVSF_PURGE_BEFORE_SPEAK)
+                    return
+                if self._interrupt_event.is_set():
+                    logger.debug("TTS interrupted by barge-in")
+                    voice.Speak("", SVSF_PURGE_BEFORE_SPEAK)
+                    return
+                if time.monotonic() - start > self._timeout:
+                    logger.warning("TTS timed out after %.1fs; skipping phrase", self._timeout)
+                    voice.Speak("", SVSF_PURGE_BEFORE_SPEAK)
+                    return
+        finally:
+            if self._on_playback_end is not None:
+                self._on_playback_end()
 
     def _drain_queue(self) -> None:
         while not self._queue.empty():

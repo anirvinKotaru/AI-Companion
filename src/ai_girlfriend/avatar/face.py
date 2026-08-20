@@ -73,12 +73,29 @@ _MODEL_URL = (
 )
 _MODEL_PATH = Path(__file__).parent / "face_landmarker.task"
 
+# Google's official model for the MediaPipe Image Segmenter task's "selfie
+# segmenter" — a person-vs-background model, used to cut the subject out
+# from the background so player.py can animate her without dragging the
+# background along with her.
+_SEGMENTER_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/image_segmenter/"
+    "selfie_segmenter/float16/1/selfie_segmenter.tflite"
+)
+_SEGMENTER_MODEL_PATH = Path(__file__).parent / "selfie_segmenter.tflite"
+
 
 def _ensure_model() -> Path:
     if not _MODEL_PATH.exists():
         logger.info("Downloading MediaPipe face landmark model (one-time, ~4MB)...")
         urllib.request.urlretrieve(_MODEL_URL, _MODEL_PATH)
     return _MODEL_PATH
+
+
+def _ensure_segmenter_model() -> Path:
+    if not _SEGMENTER_MODEL_PATH.exists():
+        logger.info("Downloading MediaPipe selfie segmentation model (one-time, ~250KB)...")
+        urllib.request.urlretrieve(_SEGMENTER_MODEL_URL, _SEGMENTER_MODEL_PATH)
+    return _SEGMENTER_MODEL_PATH
 
 
 @dataclass(frozen=True)
@@ -215,22 +232,83 @@ def warp_eye_closed(image: np.ndarray, eye: RegionGeometry) -> np.ndarray:
     return np.dstack([warped, alpha])
 
 
+def segment_person(image: np.ndarray) -> np.ndarray:
+    """Return a `(h, w)` float32 mask of `image` (BGR): 1.0 where a pixel
+    belongs to the person, 0.0 for background.
+
+    Uses `output_category_mask` rather than `output_confidence_masks` (which
+    would give a nicer soft-edged probability per pixel instead of a hard
+    cutoff): the confidence-mask output path segfaults outright with the
+    installed mediapipe/model combination, where the category mask works
+    reliably. `precompute_frames` softens the resulting hard edge with a
+    small blur afterward.
+    """
+    options = mp_vision.ImageSegmenterOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=str(_ensure_segmenter_model())),
+        output_category_mask=True,
+        output_confidence_masks=False,
+    )
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    with mp_vision.ImageSegmenter.create_from_options(options) as segmenter:
+        result = segmenter.segment(mp_image)
+    assert result.category_mask is not None
+    # This selfie-segmentation model's category 0 is the person and 255 is
+    # background (confirmed empirically against known face vs. background
+    # pixels) — the reverse of what "category 0" usually suggests.
+    category = result.category_mask.numpy_view().reshape(image.shape[:2])
+    return (category == 0).astype(np.float32)
+
+
+# How far outside her current silhouette the background needs to be
+# reconstructed: generous enough to cover the bob, twitch, and
+# squash-and-stretch movement player.py applies to her cutout at render
+# time, so a small shift never reveals a gap. Doesn't need to be exact —
+# everything deeper inside her silhouette is inpainted too, but never seen,
+# since her cutout always covers it.
+_BACKGROUND_MARGIN_PX = 24
+
+
+def build_background(image: np.ndarray, person_mask: np.ndarray) -> np.ndarray:
+    """Reconstruct what's behind the person in `image` (BGR), so player.py has a
+    static backdrop to composite her moving cutout over instead of dragging the
+    whole photo — background included — along with every animation.
+
+    Inpaints the entire person silhouette (dilated by `_BACKGROUND_MARGIN_PX`)
+    from the surrounding background. The result only needs to be convincing in
+    that outer margin — deeper inside, it's never actually seen, since her
+    cutout always covers it.
+    """
+    binary_mask = (person_mask > 0.5).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (_BACKGROUND_MARGIN_PX * 2 + 1, _BACKGROUND_MARGIN_PX * 2 + 1)
+    )
+    dilated_mask = cv2.dilate(binary_mask, kernel)
+    return cv2.inpaint(image, dilated_mask, _BACKGROUND_MARGIN_PX, cv2.INPAINT_TELEA)
+
+
 @dataclass(frozen=True)
 class AvatarAssets:
     """Precomputed rendering assets for one avatar image.
 
-    `mouth_frames` is one warped BGR frame per Rhubarb viseme shape.
+    `background` is a static BGR reconstruction of what's behind her —
+    drawn once, never animated. `mouth_frames` is one warped BGRA cutout of
+    her (alpha = person segmentation) per Rhubarb viseme shape, meant to be
+    composited on top of `background` and animated independently of it.
     `eye_overlays` is one BGRA closed-eye overlay per eye, keyed "left"/
-    "right" — composited on top of whichever mouth frame is showing to
+    "right", composited on top of whichever mouth frame is showing to
     animate a blink independently of speech.
     """
 
+    background: np.ndarray
     mouth_frames: dict[str, np.ndarray]
     eye_overlays: dict[str, np.ndarray]
 
 
 def precompute_frames(image_path: str) -> AvatarAssets:
-    """Load `image_path` and precompute its per-viseme mouth frames and eye-blink overlays."""
+    """Load `image_path` and precompute its background plate, per-viseme mouth
+    cutouts, and eye-blink overlays.
+    """
     image = cv2.imread(image_path)
     if image is None:
         raise ValueError(f"Could not load avatar image: {image_path}")
@@ -240,7 +318,16 @@ def precompute_frames(image_path: str) -> AvatarAssets:
     mouth = detect_mouth(landmarks, w, h)
     left_eye, right_eye = detect_eyes(landmarks, w, h)
 
-    mouth_frames = {name: warp_mouth(image, mouth, shape) for name, shape in MOUTH_SHAPES.items()}
+    person_mask = segment_person(image)
+    background = build_background(image, person_mask)
+    # Slightly softened so the cutout's edge blends into `background`
+    # instead of showing a hard segmentation seam.
+    alpha = np.clip(cv2.GaussianBlur(person_mask, (5, 5), 0) * 255, 0, 255).astype(np.uint8)
+
+    mouth_frames = {
+        name: np.dstack([warp_mouth(image, mouth, shape), alpha])
+        for name, shape in MOUTH_SHAPES.items()
+    }
     eye_overlays = {
         "left": warp_eye_closed(image, left_eye),
         "right": warp_eye_closed(image, right_eye),
@@ -251,4 +338,4 @@ def precompute_frames(image_path: str) -> AvatarAssets:
         len(eye_overlays),
         image_path,
     )
-    return AvatarAssets(mouth_frames=mouth_frames, eye_overlays=eye_overlays)
+    return AvatarAssets(background=background, mouth_frames=mouth_frames, eye_overlays=eye_overlays)

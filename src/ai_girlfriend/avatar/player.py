@@ -7,6 +7,7 @@ import threading
 import time
 import wave
 import winsound
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,9 @@ import win32com.client
 from ai_girlfriend.avatar.blink import BlinkScheduler
 from ai_girlfriend.avatar.bob import BOB_AMPLITUDE_PX, IdleBob
 from ai_girlfriend.avatar.face import precompute_frames
-from ai_girlfriend.avatar.jitter import JITTER_AMPLITUDE_PX, Jitter
 from ai_girlfriend.avatar.lipsync import VisemeCue, run_rhubarb
+from ai_girlfriend.avatar.squash import squash_stretch_scale
+from ai_girlfriend.avatar.twitch import HeadTwitch
 from ai_girlfriend.avatar.visemes import IDLE_SHAPE
 
 _EYE_IDS = ("left", "right")
@@ -50,17 +52,23 @@ class Avatar:
     1. renders the reply to a WAV file via SAPI5 (`SpFileStream`),
     2. runs Rhubarb Lip Sync on that WAV to get viseme timing cues,
     3. plays the WAV (`winsound`) while swapping between 9 precomputed
-       warped-mouth frames of the uploaded image on a pygame window, timed
-       against the same cues, and independently blinks one eye and then the
-       other on its own random schedule (`blink.py`), bobs the whole frame
-       up and down on a continuous triangle-wave cycle (`bob.py`), and
-       layers small abrupt random jitter on top of that (`jitter.py`) — all
-       regardless of speech, so she never looks perfectly frozen.
+       warped-mouth cutouts of her on a pygame window, timed against the
+       same cues.
 
-    Precomputing all 9 viseme frames plus both closed-eye overlays once at
+    `face.py` segments her from the background once at construction, so
+    everything below animates *her* — not the whole photo: a static
+    background plate is drawn first, then her cutout is composited on top,
+    bobbing up and down on a continuous triangle-wave cycle with a
+    squash-and-stretch tied to it (`bob.py`, `squash.py`), independently
+    blinking one eye and then the other on its own random schedule
+    (`blink.py`), and once in a long while snapping her head back and forth
+    in a quick twitch (`twitch.py`) — all regardless of speech, so she never
+    looks perfectly frozen, without the background moving with her.
+
+    Precomputing all 9 viseme cutouts plus both closed-eye overlays once at
     construction (`face.py`) means playback is just picking which cached
-    frame(s) to blit — no per-frame warping cost, so this stays real-time on
-    CPU regardless of image size.
+    frame(s) to transform and blit — no per-frame warping cost, so this
+    stays real-time on CPU regardless of image size.
     """
 
     def __init__(
@@ -69,10 +77,18 @@ class Avatar:
         rhubarb_path: str = "rhubarb.exe",
         voice: str = "",
         timeout: float = 15.0,
+        on_playback_start: Callable[[], None] | None = None,
+        on_playback_end: Callable[[], None] | None = None,
     ) -> None:
         self._rhubarb_path = rhubarb_path
         self._voice_name = voice
         self._timeout = timeout
+        # Bracket only the audible WAV playback (not WAV synthesis, which is
+        # rendered silently to a file) so a caller can mute the microphone
+        # for exactly as long as her voice is actually audible — see
+        # Listener.mute()'s docstring for why.
+        self._on_playback_start = on_playback_start
+        self._on_playback_end = on_playback_end
         # Done once, on the calling (startup) thread — precompute_frames is a
         # one-off cost, unlike everything below it which must be fast per-turn.
         self._assets = precompute_frames(image_path)
@@ -153,7 +169,7 @@ class Avatar:
             while not voice.WaitUntilDone(int(_POLL_SECONDS * 1000)):
                 self._pump_events()
                 self._blink.tick()
-                self._jitter.tick()
+                self._twitch.tick()
                 self._render()
                 if self._stop_event.is_set():
                     voice.Speak("", _SVSF_PURGE_BEFORE_SPEAK)
@@ -172,41 +188,34 @@ class Avatar:
 
     def _init_window(self) -> None:
         pygame.init()
-        first = next(iter(self._assets.mouth_frames.values()))
-        h, w = first.shape[:2]
+        bg = self._assets.background
+        h, w = bg.shape[:2]
         self._window = pygame.display.set_mode((w, h))
         pygame.display.set_caption("Avatar")
-        # Each frame gets replicated-edge padding — vertically for the bob
-        # plus jitter, horizontally for jitter alone — bigger than the
-        # window itself. Idle motion then blits it at an offset within that
-        # padding rather than resizing or moving the window, so it never
-        # exposes empty space at an edge.
-        self._x_margin = round(JITTER_AMPLITUDE_PX)
-        self._y_margin = round(BOB_AMPLITUDE_PX + JITTER_AMPLITUDE_PX)
-        xm, ym = self._x_margin, self._y_margin
+        # Static — drawn as-is every frame, never itself transformed. Her
+        # cutout (below) is composited on top of it and animated instead, so
+        # moving/rotating/scaling her doesn't drag the backdrop along too.
+        # No replicated-edge padding needed here the way the animated layer
+        # below used to require: wherever she moves away from, this is
+        # already a plausible reconstruction of what's behind her.
+        self._background_surface = pygame.surfarray.make_surface(
+            cv2.cvtColor(bg, cv2.COLOR_BGR2RGB).swapaxes(0, 1)
+        )
         self._surfaces = {
-            shape: pygame.surfarray.make_surface(
-                cv2.cvtColor(
-                    cv2.copyMakeBorder(frame, ym, ym, xm, xm, cv2.BORDER_REPLICATE),
-                    cv2.COLOR_BGR2RGB,
-                ).swapaxes(0, 1)
-            )
+            shape: pygame.image.frombuffer(
+                cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA).tobytes(), (w, h), "RGBA"
+            ).convert_alpha()
             for shape, frame in self._assets.mouth_frames.items()
         }
         self._eye_overlays = {
             eye_id: pygame.image.frombuffer(
-                cv2.cvtColor(
-                    cv2.copyMakeBorder(bgra, ym, ym, xm, xm, cv2.BORDER_REPLICATE),
-                    cv2.COLOR_BGRA2RGBA,
-                ).tobytes(),
-                (w + 2 * xm, h + 2 * ym),
-                "RGBA",
+                cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA).tobytes(), (w, h), "RGBA"
             ).convert_alpha()
             for eye_id, bgra in self._assets.eye_overlays.items()
         }
         self._bob = IdleBob()
-        self._jitter = Jitter()
         self._blink = BlinkScheduler(_EYE_IDS)
+        self._twitch = HeadTwitch()
         self._current_mouth_shape = IDLE_SHAPE
         self._render()
 
@@ -215,14 +224,49 @@ class Avatar:
         self._render()
 
     def _render(self) -> None:
-        dx = round(self._jitter.dx) - self._x_margin
-        dy = round(self._bob.offset_px() + self._jitter.dy) - self._y_margin
+        offset = self._bob.offset_px()
+        dy = round(offset)
+        angle = self._twitch.angle_deg
+        normalized_offset = offset / BOB_AMPLITUDE_PX if BOB_AMPLITUDE_PX else 0.0
+        scale_x, scale_y = squash_stretch_scale(normalized_offset)
+
+        self._window.blit(self._background_surface, (0, 0))
         surface = self._surfaces.get(self._current_mouth_shape, self._surfaces[IDLE_SHAPE])
-        self._window.blit(surface, (dx, dy))
+        self._blit_transformed(surface, 0, dy, angle, scale_x, scale_y)
         for eye_id, closed in self._blink.closed.items():
             if closed:
-                self._window.blit(self._eye_overlays[eye_id], (dx, dy))
+                self._blit_transformed(
+                    self._eye_overlays[eye_id], 0, dy, angle, scale_x, scale_y
+                )
         pygame.display.flip()
+
+    def _blit_transformed(
+        self,
+        surface: pygame.Surface,
+        dx: int,
+        dy: int,
+        angle: float,
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        """Blit `surface` at (dx, dy), scaled and then rotated."""
+        w0, h0 = surface.get_size()
+        if scale_x != 1.0 or scale_y != 1.0:
+            new_w, new_h = max(1, round(w0 * scale_x)), max(1, round(h0 * scale_y))
+            surface = pygame.transform.smoothscale(surface, (new_w, new_h))
+            # Anchored at the bottom, not the center: the squash/stretch
+            # should read as her standing on a fixed floor and growing
+            # taller/shorter from there, not swelling from her own middle
+            # (which visibly lifted her feet off the ground on a stretch).
+            dx += (w0 - new_w) // 2
+            dy += h0 - new_h
+        if angle:
+            w_pre_rotate, h_pre_rotate = surface.get_size()
+            surface = pygame.transform.rotate(surface, angle)
+            w1, h1 = surface.get_size()
+            dx += (w_pre_rotate - w1) // 2
+            dy += (h_pre_rotate - h1) // 2
+        self._window.blit(surface, (dx, dy))
 
     def _pump_events(self) -> None:
         for event in pygame.event.get():
@@ -247,7 +291,7 @@ class Avatar:
             except queue.Empty:
                 self._pump_events()
                 self._blink.tick()
-                self._jitter.tick()
+                self._twitch.tick()
                 self._render()
                 if self._stop_event.is_set():
                     self._close_window()
@@ -299,6 +343,8 @@ class Avatar:
             # for the duration of this `with` block) avoids that restriction.
             duration = _wav_duration(wav_path)
             start = time.monotonic()
+            if self._on_playback_start is not None:
+                self._on_playback_start()
             try:
                 winsound.PlaySound(wav_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
                 for cue in cues:
@@ -309,13 +355,15 @@ class Avatar:
             finally:
                 winsound.PlaySound(None, winsound.SND_PURGE)
                 self._show_frame(IDLE_SHAPE)
+                if self._on_playback_end is not None:
+                    self._on_playback_end()
 
     def _wait_until(self, deadline: float) -> bool:
         """Block until `deadline`; return True if cut short by interrupt/stop/timeout."""
         while True:
             self._pump_events()
             self._blink.tick()
-            self._jitter.tick()
+            self._twitch.tick()
             self._render()
             if self._stop_event.is_set() or self._interrupt_event.is_set():
                 return True

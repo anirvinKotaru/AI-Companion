@@ -28,6 +28,25 @@ def main() -> None:
             "https://console.groq.com/keys and add it to your .env file."
         )
 
+    # Set once Listener is constructed below; referenced here first because
+    # Speaker/Avatar (built first, so `listener` can reference them for
+    # barge-in) need to mute the mic for as long as they're audibly playing.
+    # Without this, her own voice leaking from the speakers back into the
+    # microphone — there's no acoustic echo cancellation here — gets picked
+    # up by the VAD as the user talking: it self-interrupts her mid-reply
+    # and occasionally gets transcribed and answered as if the user had said
+    # it. The tradeoff is that real barge-in (the user actually talking over
+    # her) is also unavailable while she's speaking, since the mic is off.
+    listener: Listener | None = None
+
+    def mute_mic() -> None:
+        if listener is not None:
+            listener.mute()
+
+    def unmute_mic() -> None:
+        if listener is not None:
+            listener.unmute()
+
     # Avatar (talking-head window) and Speaker (audio-only) share the same
     # say()/interrupt()/stop() interface — see docs/design/004-talking-head.md
     # — so everything below just calls `speaker` without caring which one it is.
@@ -44,9 +63,16 @@ def main() -> None:
             rhubarb_path=settings.rhubarb_path,
             voice=settings.tts_voice,
             timeout=settings.avatar_timeout_seconds,
+            on_playback_start=mute_mic,
+            on_playback_end=unmute_mic,
         )
     else:
-        speaker = Speaker(voice=settings.tts_voice, timeout=settings.tts_timeout_seconds)
+        speaker = Speaker(
+            voice=settings.tts_voice,
+            timeout=settings.tts_timeout_seconds,
+            on_playback_start=mute_mic,
+            on_playback_end=unmute_mic,
+        )
     brain = Brain(
         api_key=settings.groq_api_key.get_secret_value(),
         model=settings.llm_model,

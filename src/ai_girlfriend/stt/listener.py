@@ -88,6 +88,21 @@ class Listener:
         """True if the listener gave up on its own after repeated STT failures."""
         return self._failed
 
+    def mute(self) -> None:
+        """Stop feeding microphone audio into the recognizer.
+
+        Meant to be held for the duration of her own speech: without this,
+        her voice leaking from the speakers into the microphone (there's no
+        acoustic echo cancellation here) gets picked up by the VAD as the
+        user talking, which both self-interrupts her mid-reply and
+        occasionally gets transcribed and answered as if the user said it.
+        """
+        self._recorder.set_microphone(False)
+
+    def unmute(self) -> None:
+        """Resume feeding microphone audio into the recognizer after `mute()`."""
+        self._recorder.set_microphone(True)
+
     def _create_recorder(
         self,
         *,
