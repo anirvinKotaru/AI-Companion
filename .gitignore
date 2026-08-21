@@ -10,5 +10,6 @@ build/
 .env
 src/ai_girlfriend/avatar/face_landmarker.task
 src/ai_girlfriend/avatar/selfie_segmenter.tflite
+*.avatarcache.npz
 *.log
 Rhubarb-Lip-Sync-*/

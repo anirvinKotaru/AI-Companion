@@ -47,3 +47,6 @@ pre-commit run --all-files    # lint, format, type-check
 ```
 
 See [docs/design/001-realtime-stt.md](docs/design/001-realtime-stt.md), [docs/design/002-realtime-tts.md](docs/design/002-realtime-tts.md), [docs/design/003-llm-brain.md](docs/design/003-llm-brain.md), and [docs/design/004-talking-head.md](docs/design/004-talking-head.md) for the design rationale behind the speech-to-text, text-to-speech, chat, and avatar modules.
+
+## License
+[MIT](LICENSE)

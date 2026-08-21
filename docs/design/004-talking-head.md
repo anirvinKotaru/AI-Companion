@@ -9,7 +9,7 @@ The companion can hear, think, and speak, but has no face — replies are audio 
 - Keep the same `say(text)` / `interrupt()` / `stop()` interface `Speaker` already has, so `main.py` barely changes and barge-in keeps working.
 
 ## Non-goals
-- Photorealism or natural head motion (blinking, nodding, gaze). This is a cheap, visibly-synthetic effect, not a substitute for a rendered video.
+- Photorealism. This is a cheap, visibly-synthetic effect, not a substitute for a rendered video. (Idle motion — blinking, a bob, an occasional head twitch — was added later; see "Idle motion" below.)
 - Full viseme accuracy — Rhubarb's 9-shape set mapped onto a geometric warp of a still photo will never match a trained lip-sync model. That tradeoff is intentional (see Alternatives).
 - Real-time 3D or GAN-based reenactment (SadTalker, MuseTalk, Wav2Lip, LivePortrait, etc.) — all require an NVIDIA GPU to run at usable speed; this machine doesn't have one.
 
@@ -34,17 +34,28 @@ from ai_girlfriend.avatar.player import Avatar
 
 avatar = Avatar(image_path="my_photo.png", rhubarb_path="rhubarb.exe")
 avatar.say("Hello there!")   # non-blocking, mirrors Speaker.say()
-avatar.interrupt()           # barge-in: same semantics as Speaker.interrupt()
+avatar.interrupt()           # cuts off current playback, drops anything queued
 avatar.stop()                # shuts down worker + closes window
 ```
-`main.py` picks `Avatar` instead of `Speaker` when `AVATAR_ENABLED=true` and both are otherwise interchangeable from its point of view.
+`main.py` picks `Avatar` instead of `Speaker` when `AVATAR_ENABLED=true` and both are otherwise interchangeable from its point of view. `interrupt()` no longer doubles as live barge-in — see "Microphone self-feedback" below for why.
 
 ## Alternatives considered
 - **Wav2Lip / SadTalker / MuseTalk / LivePortrait** (GAN or diffusion-based video generation from a driving photo + audio): the standard, much higher-fidelity approach — but all assume an NVIDIA GPU. On this CPU-only/Intel-iGPU machine they'd either fail to run or take tens of seconds to minutes per reply, breaking the live-conversation feel every other module in this project is built around. Worth revisiting if a GPU becomes available (mirrors the same call already made for STT device and the local-LLM alternative in 003).
 - **PNGTuber-style amplitude-only mouth swap** (2-3 states — open/closed — driven by audio volume, no phoneme analysis): simpler still, but noticeably less convincing since it ignores which sound is being made. Rhubarb's per-phoneme cues are nearly as cheap to compute and look substantially better, so there was no real reason to settle for less.
 - **Requiring the user to hand-draw mouth-shape variants**: gives crisper, more stylized results with less warping artifacts, but adds real friction (the user explicitly wants to start from a single image). Revisit as an optional override later — `face.py`'s precomputed-frame-per-viseme design would accept hand-drawn frames as a drop-in replacement for the auto-warped ones without changing `player.py` at all.
 
+## Idle motion
+Added after the initial mouth-only version, once the auto-warped look was validated by eye: she now never sits perfectly frozen, whether idle or mid-reply.
+
+- **Segmentation compositing.** `face.py` runs MediaPipe's Image Segmenter (`selfie_segmenter.tflite`) once per image to separate her from the background, then `cv2.inpaint`s a static background plate to fill in what's behind her (`build_background`). `player.py` draws that plate once per frame and composites her BGRA cutout on top, so the animations below move only her, not the whole photo. (`output_confidence_masks=True` segfaults with this mediapipe/model combination — `output_category_mask=True` is used instead, with the resulting hard edge softened by a small Gaussian blur.)
+- **Blink** (`blink.py`): an asymmetric two-eye state machine — one eye closes, then the other a beat later, then both reopen the same way — on a randomized interval, independent of speech.
+- **Idle bob + squash-and-stretch** (`bob.py`, `squash.py`): a continuous vertical "V" bob, eased with a smootherstep curve so she holds near the top/bottom and snaps quickly through the middle rather than moving at a constant rate. The bob's phase directly drives a tied squash-and-stretch scale, anchored at the bottom edge (not the center) so she reads as standing on a fixed floor and growing/shrinking from there, not swelling from her own middle.
+- **Head twitch** (`twitch.py`): a rare (every 25-75s), quick back-and-forth rotation snap, decaying over a few steps.
+
+## Microphone self-feedback
+There's no acoustic echo cancellation in this pipeline. Without it, her own voice playing through the speakers leaks into the microphone and gets misread by the VAD as the user talking — which both self-interrupts her mid-reply and occasionally gets transcribed and answered as if the user had said it themselves. Fixed by having `Speaker`/`Avatar` accept `on_playback_start`/`on_playback_end` callbacks, fired around exactly the audible span of their own output (not synthesis, which SAPI5 renders silently to a file first); `main.py` wires these to `Listener.mute()`/`unmute()`, which toggle RealtimeSTT's `set_microphone()`. The tradeoff: real barge-in (the user actually talking over her) no longer works while she's speaking, since the mic is off for that window — the standard way small voice-assistant setups without a headset/AEC handle this problem.
+
 ## Future work
-- Let the user supply their own per-viseme images to replace the auto-warp, once the auto-warped look is validated by eye.
-- Idle animation (subtle breathing/blink loop) between replies instead of a static frame.
+- Let the user supply their own per-viseme images to replace the auto-warp.
+- Real acoustic echo cancellation (e.g. via a headset, or a proper AEC library) to restore live barge-in without the self-feedback problem.
 - Reassess against Wav2Lip/SadTalker if a GPU becomes available later.

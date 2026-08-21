@@ -308,7 +308,18 @@ class AvatarAssets:
 def precompute_frames(image_path: str) -> AvatarAssets:
     """Load `image_path` and precompute its background plate, per-viseme mouth
     cutouts, and eye-blink overlays.
+
+    Segmentation + inpainting takes tens of seconds, so the result is cached
+    to disk next to `image_path` (see `_cache_path`) and reused on later
+    runs as long as the source image and this module's precompute logic
+    (`_CACHE_VERSION`) haven't changed since.
     """
+    path = Path(image_path)
+    cached = _load_cached_frames(path)
+    if cached is not None:
+        logger.info("Loaded precomputed avatar assets for %s from cache", image_path)
+        return cached
+
     image = cv2.imread(image_path)
     if image is None:
         raise ValueError(f"Could not load avatar image: {image_path}")
@@ -338,4 +349,70 @@ def precompute_frames(image_path: str) -> AvatarAssets:
         len(eye_overlays),
         image_path,
     )
-    return AvatarAssets(background=background, mouth_frames=mouth_frames, eye_overlays=eye_overlays)
+    assets = AvatarAssets(
+        background=background, mouth_frames=mouth_frames, eye_overlays=eye_overlays
+    )
+    _save_cached_frames(path, assets)
+    return assets
+
+
+# Bump whenever precompute_frames' output would change for the same source
+# image (a warp/segmentation tweak, a new asset added to AvatarAssets, etc.)
+# so stale on-disk caches from before the change are ignored rather than
+# silently served.
+_CACHE_VERSION = 1
+
+
+def _cache_path(image_path: Path) -> Path:
+    return image_path.parent / f"{image_path.name}.avatarcache.npz"
+
+
+def _load_cached_frames(image_path: Path) -> AvatarAssets | None:
+    cache_path = _cache_path(image_path)
+    if not cache_path.exists():
+        return None
+    try:
+        stat = image_path.stat()
+        with np.load(cache_path, allow_pickle=False) as data:
+            if (
+                int(data["version"]) != _CACHE_VERSION
+                or int(data["mtime_ns"]) != stat.st_mtime_ns
+                or int(data["size"]) != stat.st_size
+            ):
+                return None
+            mouth_shape_names = [str(s) for s in data["mouth_shape_names"]]
+            eye_ids = [str(s) for s in data["eye_ids"]]
+            return AvatarAssets(
+                background=data["background"],
+                mouth_frames={name: data[f"mouth_frame_{name}"] for name in mouth_shape_names},
+                eye_overlays={eid: data[f"eye_overlay_{eid}"] for eid in eye_ids},
+            )
+    except Exception:
+        logger.warning(
+            "Avatar asset cache at %s unreadable; recomputing", cache_path, exc_info=True
+        )
+        return None
+
+
+def _save_cached_frames(image_path: Path, assets: AvatarAssets) -> None:
+    stat = image_path.stat()
+    mouth_shape_names = list(assets.mouth_frames.keys())
+    eye_ids = list(assets.eye_overlays.keys())
+    arrays: dict[str, Any] = {
+        "version": np.array(_CACHE_VERSION),
+        "mtime_ns": np.array(stat.st_mtime_ns),
+        "size": np.array(stat.st_size),
+        "background": assets.background,
+        "mouth_shape_names": np.array(mouth_shape_names),
+        "eye_ids": np.array(eye_ids),
+        **{f"mouth_frame_{name}": frame for name, frame in assets.mouth_frames.items()},
+        **{f"eye_overlay_{eid}": overlay for eid, overlay in assets.eye_overlays.items()},
+    }
+    try:
+        np.savez_compressed(_cache_path(image_path), **arrays)
+    except OSError:
+        logger.warning(
+            "Could not write avatar asset cache for %s; will recompute next run",
+            image_path,
+            exc_info=True,
+        )
